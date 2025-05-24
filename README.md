@@ -8,18 +8,20 @@ In this work, we propose HC-SMoE (Hierarchical Clustering for Sparsely activated
 
 
 ## Updates
-- [2025/05/01] :fire: Our paper, **Retraining-Free Merging of Sparse Mixture-of-Experts via Hierarchical Clustering**, has been accepted by **ICML 2025**! The accepted version of paper will be release soon.
+- [2025/05/01] :fire: Our paper, **Retraining-Free Merging of Sparse Mixture-of-Experts via Hierarchical Clustering**, has been accepted by **ICML 2025**!
 
-
+## TODO
+- [ ] Release accepted version of the paper.
+- [ ] Update citation.
 
 
 ## Code Description
 This repository is written based on the codes in the [GitHub](https://github.com/UNITES-Lab/MC-SMoE).
 
 ## Setup
-```
-pip install -r requirements.txt
-```
+1. Install basic packages. `pip install -r requirements.txt`
+2. Install `lm-eval`. [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness)
+
 
 ## Dataset Preparation
 Please download the C4 training data c4-train.00000-of-01024.json from [allenai/c4](https://huggingface.co/datasets/allenai/c4/blob/main/en/c4-train.00000-of-01024.json.gz).
