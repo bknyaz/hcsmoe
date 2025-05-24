@@ -169,8 +169,6 @@ tags
 # ruff
 .ruff_cache
 
-mc_env/
-
 # 2024/06/02
 log_*
 log*
@@ -180,27 +178,10 @@ log*
 
 .deepspeed_env
 try.py
-hcsmoe/data/c4-train.00000-of-01024.json
+hcsmoe/data/*.json
 *.pt
 *-log
 temp/
-scripts/tinyllama/
-scripts/mixtral/merge*.sh
-scripts/mixtral/prune*.sh
-scripts/qwen/merge1.sh
-
-
-analysis/info/tinyllama/
-analysis/.ipynb_checkpoints
-analysis/results/
-analysis/a.txt
-analysis/*.ipynb
-analysis/*.py
-
-lm-evaluation-harness/
-promptsource/
-omnicli/
-transformers/
 results/
 
 docker-compose.yaml
