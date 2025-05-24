@@ -12,7 +12,6 @@ In this work, we propose HC-SMoE (Hierarchical Clustering for Sparsely activated
 
 ## TODO
 - [ ] Release accepted version of the paper.
-- [ ] Update citation.
 
 
 ## Code Description
@@ -46,13 +45,10 @@ bash scripts/qwen/run.sh
 
 ## Citation
 ```
-@misc{chen2025retrainingfreemergingsparsemoe,
+@misc{chen2025hcsmoe,
       title={Retraining-Free Merging of Sparse MoE via Hierarchical Clustering}, 
       author={I-Chun Chen and Hsu-Shen Liu and Wei-Fang Sun and Chen-Hao Chao and Yen-Chang Hsu and Chun-Yi Lee},
       year={2025},
-      eprint={2410.08589},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2410.08589}, 
+      booktitle={International Conference on Machine Learning (ICML)}
 }
 ```
