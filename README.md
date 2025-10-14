@@ -1,54 +1,38 @@
-# Retraining-Free Merging of Sparse Mixture-of-Experts via Hierarchical Clustering
+# Fork of HC-SMoE for Qwen3 MoE models
 
 [![arXiv](https://img.shields.io/badge/arXiv-2503.10522-brightgreen.svg?style=flat-square)](https://arxiv.org/abs/2410.08589)
 
-In this work, we propose HC-SMoE (Hierarchical Clustering for Sparsely activated Mixture of Experts), a task-agnostic expert merging framework that reduces SMoE model parameters without retraining. Unlike previous methods, HC-SMoE employs hierarchical clustering based on expert outputs, ensuring that the merging process is unaffected by routing decisions. This output-based clustering strategy captures functional similarities between experts, offering an adaptable solution for models with numerous experts. We validate our approach through extensive experiments on eight zero-shot language tasks and demonstrate its effectiveness in large-scale SMoE models like Qwen and Mixtral. Our results show that HC-SMoE consistently achieves strong performance, highlighting its potential for real-world deployment.
-
-![figure](./assets/main-idea-new.png)
-
-
-## Updates
-- [2025/05/01] :fire: Our paper, **Retraining-Free Merging of Sparse Mixture-of-Experts via Hierarchical Clustering**, has been accepted by **ICML 2025**!
-
-## TODO
-- [ ] Release accepted version of the paper.
-
-
-## Code Description
-This repository is written based on the codes in the [GitHub](https://github.com/UNITES-Lab/MC-SMoE).
+- Original code (HC-SMoE): https://github.com/wazenmai/HC-SMoE
+- Baseline (MC-SMoE): https://github.com/UNITES-Lab/MC-SMoE
 
 ## Setup
-1. Install basic packages. `pip install -r requirements.txt`
-2. Install `lm-eval`. [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness)
 
+Install the following recommended versions:
 
-## Dataset Preparation
-Please download the C4 training data c4-train.00000-of-01024.json from [allenai/c4](https://huggingface.co/datasets/allenai/c4/blob/main/en/c4-train.00000-of-01024.json.gz).
+```
+pip install langdetect immutabledict torch_geometric bitsandbytes torch==2.7.1 torchvision torchtext torchaudio transformers==4.55.4 datasets vllm==0.10.1.1 numpy==1.26.4;
+pip install evaluate==0.4.6  # use fresh version of evaluate
+pip install fire deepspeed
 
-Then save it to path `hcsmoe/data/c4-train.00000-of-01024.json`.
-
-Or you can assign the path in [hcsmoe/evaluation/minipile.py](./hcsmoe/evaluation/minipile.py).
-```python
-DATASETS = {
-    'c4': lambda: load_dataset('json', data_files={'train': 'hcsmoe/data/c4-train.00000-of-01024.json'}, trust_remote_code=True),
-}
+cd $HOME;
+git clone git@github.com:EleutherAI/lm-evaluation-harness.git
+cd lm-evaluation-harness
+pip install -e .
+cd $HOME;
 ```
 
-## Experiments
-We provide the code script in `scripts/mixtral/run.sh` and `scripts/qwen/run.sh`. Change the setting in those files. Run the script file as follows.
+## Run merging and small tasks eval
 
 For detailed description for each argument, please see [here](./scripts/README.md).
 ```
-bash scripts/mixtral/run.sh
+# adjust the paths and other arguments in the following script before running it
 bash scripts/qwen/run.sh
 ```
 
-## Citation
+## Evaluation on larger tasks
+
+Example for IFeval using 4xA100/H100 GPUs:
 ```
-@misc{chen2025hcsmoe,
-      title={Retraining-Free Merging of Sparse MoE via Hierarchical Clustering}, 
-      author={I-Chun Chen and Hsu-Shen Liu and Wei-Fang Sun and Chen-Hao Chao and Yen-Chang Hsu and Chun-Yi Lee},
-      year={2025},
-      booktitle={International Conference on Machine Learning (ICML)}
-}
+python -m lm_eval --model vllm --model_args pretrained=Qwen/Qwen3-30B-A3B-Instruct-2507,tensor_parallel_size=4,dtype=auto,gpu_memory_utilization=0.9,data_parallel_size=1 --tasks ifeval --batch_size 1 --apply_chat_template=True --confirm_run_unsafe_code
 ```
+tip: in case of OOM use max_model_len=131072 (or smaller number).
