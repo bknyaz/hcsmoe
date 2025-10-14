@@ -49,7 +49,7 @@ def get_calib_dataloder(
             all_set.append(dset)
         all_set = concatenate_datasets(all_set)
     else:
-        all_set = DATASETS[dataset]()
+        all_set = DATASETS[dataset]()['train']
     block_size = tokenizer.model_max_length
     print('all_set', all_set)
     if block_size > max_block_size:
