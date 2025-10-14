@@ -5,6 +5,7 @@ from copy import deepcopy
 from typing import Dict, List, Optional, Tuple
 from types import MethodType
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -12,6 +13,9 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import Qwen2MoeForCausalLM, Qwen2MoeConfig
 from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeSparseMoeBlock, Qwen2MoeMLP
+
+#from torch.distributed.tensor import DTensor
+#DTensor.disable_tensor_parallel()  # or config with mesh=None
 
 from .utils import generate_random_group_labels
 from hcsmoe.utils.constants import FP32_EPS
@@ -222,6 +226,7 @@ class ExpertsGrouperForQwen2MoE(object):
                 expert_outputs = [] # (E, #T, D) -> average -> (E, D)
                 with torch.no_grad():
                     for i in range(self.num_experts):
+                        print('\n\n layer', layer_idx, model.model.layers[layer_idx].mlp.experts[i](layer_input).shape)
                         expert_outputs.append(model.model.layers[layer_idx].mlp.experts[i](layer_input).mean(dim=0))
                     expert_outputs = torch.stack(expert_outputs)
                     score = self.silhouette_score(expert_outputs, self._group_state_dict[ffn_name])
@@ -483,6 +488,8 @@ class ExpertsGrouperForQwen2MoE(object):
         handles = []
         def _get_activation_hook(name):
             def hook(module, input, output):
+                #print('\n fw hook', name, 'input', input[0].shape)
+                #fw hook model.layers.3.mlp input torch.Size([2, 2048, 2048])
                 forwarded_hidden_states[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1])) # .cpu()
             return hook
         
@@ -519,7 +526,11 @@ class ExpertsGrouperForQwen2MoE(object):
                 for i in range(self.num_experts):
                     expert_outputs.append(model.model.layers[layer_idx].mlp.experts[i](layer_input).mean(dim=0))
                 expert_outputs = torch.stack(expert_outputs)
+                # print('\nexpert_outputs', expert_outputs.shape, self.cluster,self.linkage,self.hierarchical_stopping_metric,ffn_name in self._init_center_state_dict, flush=True)
+                # expert_outputs torch.Size([60, 2048]) hirarchical average silhouette False
+
                 num_groups_in_layer = num_groups_per_layer[ffn_name] if self.dynamic_group else num_groups
+                print('\nlayer_idx', layer_idx)
                 dom_experts[ffn_name], label = group_experts_by_clustering(
                     model="qwen",
                     num_groups=num_groups_in_layer,
@@ -529,6 +540,25 @@ class ExpertsGrouperForQwen2MoE(object):
                     num_experts=self.num_experts,
                     experts=expert_outputs,
                     init_center=self._init_center_state_dict[ffn_name] if ffn_name in self._init_center_state_dict else None)
+                #print('label', label)
+                #print('groups', dom_experts[ffn_name])
+                # saving the grouping so that we remove unmerged experts before saving the model in the main script
+                groups = []
+                group_sizes = {}
+                labels_np = label.cpu().data.numpy()
+                for j in range(len(np.unique(labels_np))):
+                    indices = list(map(int, np.where(labels_np == j)[0]))
+                    groups.append(indices)
+                    s = len(indices)
+                    if s not in group_sizes:
+                        group_sizes[s] = 0
+                    group_sizes[s] += 1
+    
+                print(f'grouping into {len(np.unique(labels_np))} groups is done', flush=True)
+                for s in sorted(group_sizes.keys()):
+                    print(f'{group_sizes[s]} groups with {s} experts', flush=True)
+
+                model.model.layers[layer_idx].mlp._groups = groups
                 self._group_state_dict[ffn_name] = label.cpu()
             del layer_input
         torch.cuda.empty_cache()
@@ -948,17 +978,18 @@ class ExpertsGrouperForQwen2MoE(object):
     ):
         model.eval()
         config = model.config
-        for batch in tqdm(dataloader, desc=f"[HC-SMoE] Evaluating routing distribution"):
+        for batch_ind, batch in enumerate(tqdm(dataloader, desc=f"[HC-SMoE] Evaluating routing distribution")):
             batch = {k: v.cuda() for k, v in batch.items()}
             if "labels" in batch:
                 # We don't need to compute loss here, so remove the labels
                 batch.pop("labels")
+            print('\n\nbatch', batch_ind, batch['input_ids'].shape)
             with torch.no_grad():
                 outputs = model(**batch, output_router_logits=True)
             all_router_logits = outputs.router_logits
             if mode == "frequency":
                 all_router_logits = torch.stack(all_router_logits)  # of shape (num_hidden_layers, num_tokens, num_experts)
-                selected_experts = torch.topk(all_router_logits, 2, dim=-1)[1].reshape(
+                selected_experts = torch.topk(all_router_logits, model.config.num_experts_per_tok, dim=-1)[1].reshape(
                     config.num_hidden_layers, -1
                 )  # of shape (num_hidden_layers, num_tokens * 2)
                 for layer_idx in self.sparse_layer_indices:
@@ -1232,6 +1263,7 @@ def _merge_mlp_experts_by_usage_frequency_weighting(
 ) -> Qwen2MoeSparseMoeBlock:
     for label in group_labels.unique():
         expert_indices = torch.where(group_labels == label)[0]
+
         gate_proj_weight_list = torch.stack(
             [ffn.experts[expert_idx].gate_proj.weight * usage_frequencies[expert_idx]
              for expert_idx in expert_indices], dim=0
@@ -2081,11 +2113,15 @@ def merge_by_groups_with_usage_weighted(
         ffn_name = f"model.layers.{layer_idx}.mlp"
         group_labels = group_labels_dict[ffn_name]
         usage_frequencies = usage_frequency_dict[ffn_name]
+        print('before merging params', sum([p.numel() for p in model.model.layers[layer_idx].mlp.parameters()]))
         model.model.layers[layer_idx].mlp = _merge_mlp_experts_by_usage_frequency_weighting(
             ffn=model.model.layers[layer_idx].mlp,
             group_labels=group_labels,
             usage_frequencies=usage_frequencies,
         )
+        print('after merging', layer_idx, ffn_name, sum([p.numel() for p in model.model.layers[layer_idx].mlp.parameters()]))
+        #print('gate', model.model.layers[layer_idx].mlp.gate.weight.shape)
+        #print('experts', len(model.model.layers[layer_idx].mlp.experts))
     return model
 
 

@@ -8,7 +8,7 @@ import itertools
 import logging
 import torch
 import transformers
-from datasets import load_dataset, Dataset
+from datasets import load_dataset, Dataset, concatenate_datasets
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (
@@ -22,7 +22,9 @@ from transformers.testing_utils import CaptureLogger
 logger = logging.getLogger(__name__)
 
 DATASETS = {
-    'c4': lambda: load_dataset('json', data_files={'train': 'hcsmoe/data/c4-train.00000-of-01024.json'}, trust_remote_code=True),
+    'c4': lambda: load_dataset('json', data_files='hcsmoe/data/calib_set_c4_hcsmoe.json', trust_remote_code=True),
+    's1': lambda: load_dataset('json', data_files='hcsmoe/data/calib_set_s1k_1.1.json', trust_remote_code=True),
+    'the-stack-smol': lambda: load_dataset('json', data_files='hcsmoe/data/calib_set_the_stack_smol.json', trust_remote_code=True),
 }
 
 def get_calib_dataloder(
@@ -34,9 +36,22 @@ def get_calib_dataloder(
     num_workers: int,
     seed: int = 42,
 ):
-    all_set = DATASETS[dataset]()
+    if dataset == 'all':
+        all_set = []
+        for dname in DATASETS:
+            dset = DATASETS[dname]()
+            if dname == 's1':
+                dset = dset['train'].rename_column('question', 'text').select_columns(['text'])
+            elif dname == 'the-stack-smol':
+                dset = dset['train'].rename_column('content', 'text').select_columns(['text'])
+            else:
+                dset = dset['train'].select_columns(['text'])
+            all_set.append(dset)
+        all_set = concatenate_datasets(all_set)
+    else:
+        all_set = DATASETS[dataset]()
     block_size = tokenizer.model_max_length
-
+    print('all_set', all_set)
     if block_size > max_block_size:
         logger.info(
             "The chosen tokenizer supports a `model_max_length` that is longer than the default `max_block_size` value"
@@ -46,12 +61,13 @@ def get_calib_dataloder(
         block_size = max_block_size
 
     if n_blocks_for_stat > 0:  # Random choose `n_blocks_for_stat` blocks
-        calib_set = all_set['train'].shuffle(seed=seed).select(
-            range(min(n_blocks_for_stat * 16, len(all_set['train']))))
+        calib_set = all_set.shuffle(seed=seed).select(
+            range(min(n_blocks_for_stat * 16, len(all_set))))
     else:   # Use the whole set
         logger.warning('n_blocks_for_stat <= 0, using the whole dataset.')
-        calib_set = all_set['train'].shuffle(seed=seed)
-    
+        calib_set = all_set.shuffle(seed=seed)
+    print('calib_set', calib_set)
+
     logger.info(f'Calibration dataset: {calib_set}')
     text_column_name = "text" if "text" in calib_set.features else list(
         calib_set.features)[0]

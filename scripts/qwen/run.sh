@@ -6,16 +6,16 @@ export HF_HOME="your-huggingface-home-path"
 
 accelerate launch --config_file static/finetune_config.yaml \
   --main_process_port 29512 hcsmoe/merging-qwen.py \
-  --model_name="Qwen/Qwen1.5-MoE-A2.7B-Chat" \
+  --model_name="Qwen/Qwen3-30B-A3B-Instruct-2507" \
   --task="winogrande,arc_challenge,arc_easy,boolq,hellaswag,mmlu,openbookqa,rte" \
   --dominant="no" \
   --similarity_base="expert-output" \
-  --cluster="hirarchical" \
+  --cluster="hierarchical" \
   --linkage="average" \
   --merge="freq" \
-  --num_average_groups=45 \
+  --num_average_groups=96 \
   --n_sentences=32 \
   --train_batch_size=2 \
   --eval_batch_size=16 \
-  --result_path="results/results_qwen_test.txt" \
-  --output_path="results/qwen/merge-45e/test" |& tee results/log_45e_test
+  --result_path="$HF_HOME/results_qwen_test.txt" \
+  --output_path="$HF_HOME/results/qwen/merge/test" |& tee results/log_45e_test

@@ -92,9 +92,9 @@ def group_experts_by_clustering(
         distances1 = _standardize(torch.cdist(experts, centers) / s1)
         distances2 = _standardize(torch.cdist(experts2, centers2) / s2) if experts2 is not None else torch.zeros(1, device=experts.device)
         distances3 = _standardize(torch.cdist(experts3, centers3) / s3) if experts3 is not None else torch.zeros(1, device=experts.device)
-        print(f"distances1: {distances1.shape} {distances1}")
-        print(f"distances2: {distances2.shape} {distances2}")
-        print(f"distances3: {distances3.shape} {distances3}")
+        #print(f"distances1: {distances1.shape} {distances1}")
+        #print(f"distances2: {distances2.shape} {distances2}")
+        #print(f"distances3: {distances3.shape} {distances3}")
 
         distances = (w1 * distances1 + w2 * distances2 + w3 * distances3) / (w1 + w2 + w3)
         assignments = torch.argmin(distances, dim=1)
@@ -104,9 +104,9 @@ def group_experts_by_clustering(
         new_centers2 = torch.stack([experts2[assignments == k].mean(dim=0) for k in range(num_groups)]) if experts2 is not None else None
         new_centers3 = torch.stack([experts3[assignments == k].mean(dim=0) for k in range(num_groups)]) if experts3 is not None else None
         
-        print(f"assignments: {assignments}")
-        for k in range(num_groups):
-            print(f"cluster {k} {experts[assignments==k]}")
+        #print(f"assignments: {assignments}")
+        #for k in range(num_groups):
+            #print(f"cluster {k} {experts[assignments==k]}")
         print(f"new_centers: {torch.sum(torch.isnan(new_centers))}, {new_centers[0]}")
         if experts2 is not None:
             print(f"new_centers2: {torch.sum(torch.isnan(new_centers2))}, {new_centers2[0]}")
@@ -322,6 +322,7 @@ def linkage_step(distances, pair_distances, clusters=None, method='single', X=No
 def hierarchical_clustering(X, n_clusters, method='single'):
     """Perform hierarchical clustering using the specified linkage method."""
     print("hierarchical clustering - {} to {} clusters".format(method, n_clusters))
+    print('\n\nX', X.shape, flush=True)
     device = X.device
     n_samples = X.shape[0]
     
@@ -335,7 +336,7 @@ def hierarchical_clustering(X, n_clusters, method='single'):
     # Perform clustering
     while len(torch.unique(clusters)) > n_clusters:
         i, j, distances = linkage_step(distances, pair_distances, clusters, method, X)
-        print(f"clusters: {len(torch.unique(clusters))}, merge ({i}, {j})")
+        #print(f"clusters: {len(torch.unique(clusters))}, merge ({i}, {j})")
         cj = clusters[j]
         # Merge cluster j to cluster i
         clusters[clusters == cj] = clusters[i]

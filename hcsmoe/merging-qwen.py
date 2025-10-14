@@ -8,13 +8,18 @@ import time
 import pickle
 from typing import Optional
 
+import numpy as np
 import logging
 import torch
 from fire import Fire
-from transformers import Qwen2MoeForCausalLM, AutoTokenizer
+from transformers import Qwen2MoeForCausalLM, AutoTokenizer, AutoModelForCausalLM
+
+#from torch.distributed.tensor import DTensor
+#DTensor.disable_tensor_parallel()  # or config with mesh=None
 
 from hcsmoe.evaluation import get_minipile_dataloder, evaluate_minipile_perplexity, evaluate_fewshot, get_calib_dataloder
-from hcsmoe.merging.grouping_qwen import ExpertsGrouperForQwen2MoE, merge_by_groups_with_usage_weighted, merge_by_groups_within_and_across_models, merge_by_feature_selection
+from hcsmoe.merging.grouping_qwen import ExpertsGrouperForQwen2MoE, merge_by_groups_with_usage_weighted, merge_by_groups_within_and_across_models 
+#, merge_by_feature_selection
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +85,7 @@ class Args:
 
 def get_dataloader(args, tokenizer):
     return get_calib_dataloder(
-        dataset="c4",
+        dataset="c4",  # or 'all'
         tokenizer=tokenizer,
         max_block_size=2048,
         n_blocks_for_stat=args.n_sentences, # 32, 128
@@ -119,7 +124,7 @@ def evaluation(args, model, tokenizer):
             model, tokenizer=tokenizer, task=args.task, num_fewshot=args.num_fewshot, output_path=args.result_path, log=True
         )
     else:
-        for i, t in enumerate(args.tasks):
+        for i, t in enumerate(args.task):
             evaluate_fewshot(
                 model, tokenizer=tokenizer, task=t, num_fewshot=args.num_fewshot, eval_batch_size=args.eval_batch_size, output_path=args.result_path, log=True
             )
@@ -129,6 +134,31 @@ def print_usage_frequency(usage_dict):
         for num in usage_dict[k]:
             print(round(num.item(), 4), end=',')
         print()
+
+def remove_experts(model):
+    for layer in model.model.layers:
+        moe_layer = layer.mlp
+        if getattr(moe_layer, '_groups', None) is not None:
+            experts_to_delete = []
+            experts_to_keep = []
+            for group in moe_layer._groups:
+                experts_to_keep.append(group[0])
+                experts_to_delete.extend(group[1:])  # keep the first expert in each group
+            experts_to_delete.sort(reverse=True)
+            experts_to_keep.sort()
+            experts_to_keep = np.array(experts_to_keep)
+            for idx in experts_to_delete:
+                del moe_layer.experts[idx]
+            # print(f'keep {len(moe_layer.experts)} experts', experts_to_keep, flush=True)
+            moe_layer.num_experts = len(moe_layer.experts)
+            moe_layer.gate.weight.data = moe_layer.gate.weight.data[experts_to_keep]
+            moe_layer.gate.out_features = len(moe_layer.experts)
+            del moe_layer._groups  # no need to save this anymore
+        else:
+            print('no _groups in layer')
+    model.config.num_experts = moe_layer.num_experts
+
+    return model
 
 
 def run_hcsmoe(
@@ -190,15 +220,20 @@ def run_hcsmoe(
     )
     torch.manual_seed(0)
 
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-MoE-A2.7B-Chat")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     tokenizer.pad_token_id = tokenizer.eos_token_id
-    model = Qwen2MoeForCausalLM.from_pretrained(
-        "Qwen/Qwen1.5-MoE-A2.7B-Chat",
-        torch_dtype=torch.bfloat16, device_map="auto"
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_name,
+        torch_dtype="auto", #torch.bfloat16,
+        device_map="auto",
+        cache_dir=os.environ['HF_HOME']
     )
     if model_path:
         model.load_state_dict(torch.load(model_name))
     model.eval()
+    print(model)
+    print("[HC-SMoE] Number of parameters before merging:", model.num_parameters(), sum([p.numel() for p in model.parameters()]))
+
     dataloader_for_merging = get_dataloader(args, tokenizer)
     grouper = get_grouper(args, model.config)
 
@@ -232,8 +267,11 @@ def run_hcsmoe(
             num_average_groups=num_average_groups, merging_layers=list(range(start_layer, model.config.num_hidden_layers))
         )
     elif dominant == "no":
-        ### Clustering
-        dom_experts = grouper.cluster_experts(model=model, dataloader=dataloader_for_merging, num_groups=num_average_groups)
+        if merge == 'no':
+            dom_experts = None
+        else:
+            ### Clustering
+            dom_experts = grouper.cluster_experts(model=model, dataloader=dataloader_for_merging, num_groups=num_average_groups)
     else:
         raise ValueError(f"Unknown dominant: {dominant}")   
 
@@ -242,7 +280,7 @@ def run_hcsmoe(
         model = merge_by_groups_with_usage_weighted(
             model, grouper=grouper, merging_layers=list(range(start_layer, model.config.num_hidden_layers))
         )
-    else:
+    elif merge != 'no':
         model = merge_by_groups_within_and_across_models(
             qwen_model=model,
             grouper=grouper,
@@ -267,13 +305,18 @@ def run_hcsmoe(
             print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]}, {len(dom_experts[name])})")
 
     del grouper
-    
-    ### 5. Save model
-    print("[HC-SMoE] Number of parameters after merging:", model.num_parameters())
-    if not os.path.exists(output_path):
-        os.makedirs(output_path)
-    torch.save(model.state_dict(), output_path+"/model.pth")
 
+    model = remove_experts(model)
+
+    ### 5. Save model
+    print("[HC-SMoE] Number of parameters after merging:", model.num_parameters(), sum([p.numel() for p in model.parameters()]))
+    if not os.path.exists(output_path+"/model"):
+        os.makedirs(output_path+"/model")
+    model.save_pretrained(output_path+"/model",
+                                      safe_serialization=True,
+                                      max_shard_size='4GB')
+    tokenizer.save_pretrained(output_path+"/model")
+    print('saving done!')
 
     ### 6. Evaluation
     evaluation(args, model, tokenizer)
