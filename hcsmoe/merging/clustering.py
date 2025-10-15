@@ -320,10 +320,14 @@ def linkage_step(distances, pair_distances, clusters=None, method='single', X=No
 
 @torch.no_grad()
 def hierarchical_clustering(X, n_clusters, method='single'):
-    """Perform hierarchical clustering using the specified linkage method."""
-    print("hierarchical clustering - {} to {} clusters".format(method, n_clusters))
-    print('\n\nX', X.shape, flush=True)
-    device = X.device
+    """Perform hierarchical clustering using the specified linkage method.
+    :param X: Tensor of shape (number of experts, n_features - model dimension)
+    :param n_clusters: The number of clusters to form.
+    :param method: Linkage method: 'single', 'complete', 'average'.
+    :return: Cluster assignments and the ID of the expert closest to the group center
+    '"""
+
+    print("hierarchical clustering - {} to {} clusters, features = {}".format(method, n_clusters, X.shape))
     n_samples = X.shape[0]
     
     # Compute pairwise distances

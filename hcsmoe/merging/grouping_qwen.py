@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import Qwen2MoeForCausalLM, Qwen2MoeConfig
 from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeSparseMoeBlock, Qwen2MoeMLP
+from scipy.optimize import linear_sum_assignment
 
 #from torch.distributed.tensor import DTensor
 #DTensor.disable_tensor_parallel()  # or config with mesh=None
@@ -983,7 +984,8 @@ class ExpertsGrouperForQwen2MoE(object):
             if "labels" in batch:
                 # We don't need to compute loss here, so remove the labels
                 batch.pop("labels")
-            print('\n\nbatch', batch_ind, batch['input_ids'].shape)
+            if batch_ind == 0:
+                print('\nbatch', batch_ind, batch['input_ids'].shape)
             with torch.no_grad():
                 outputs = model(**batch, output_router_logits=True)
             all_router_logits = outputs.router_logits
@@ -1255,30 +1257,78 @@ def get_coef(num_ffn, input_weight, average_coefs, d_ff=None):
             )
     return coef
 
+def casted_mul(a, b):
+    # converge both a and b to float16, then convert back to a's dtype
+    if a.dtype == torch.float32 and b.dtype == torch.float32:
+        return a * b
+    a_fp32 = a.to(torch.float32)
+    b_fp32 = b.to(torch.float32)
+    return (a_fp32 * b_fp32).to(a.dtype)
+
+def align_weights(experts):
+
+    print('running weight alignment...')
+    def mlp2mat(mlp):
+        fp = torch.cat([mlp.gate_proj.weight, mlp.up_proj.weight, mlp.down_proj.weight.t()], dim=1)  # (768, 2048+2048+2048=6144)
+        return fp
+
+    def apply_perm_to_mlp(mlp, perm):
+        # perm maps A_i -> B_perm[i]; to align B to A order:
+        mlp_aligned = mlp
+        mlp_aligned.gate_proj.weight.data = mlp.gate_proj.weight.data[perm, :]  # rows permuted
+        mlp_aligned.up_proj.weight.data = mlp.up_proj.weight.data[perm, :]
+        mlp_aligned.down_proj.weight.data = mlp.down_proj.weight.data[:, perm]  # columns permuted
+        return mlp_aligned
+
+    expert_weights = torch.stack([mlp2mat(mlp) for mlp in experts])  # (n, 768, 6144)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    experts_aligned = [experts[0]]  # first expert is the reference
+    for i in range(1, len(experts)):
+        weights_a = expert_weights[0]
+        weights_b = expert_weights[i]
+        cost = torch.cdist(weights_a.to(device).float(),
+                           weights_b.to(device).float()).cpu().numpy()
+        _, perm = linear_sum_assignment(cost)  # permutation of B aligned to A
+        experts_aligned.append(apply_perm_to_mlp(experts[i], perm))
+    return experts_aligned
+
+
 @torch.no_grad()
 def _merge_mlp_experts_by_usage_frequency_weighting(
         ffn: Qwen2MoeSparseMoeBlock,
         group_labels: torch.LongTensor,
         usage_frequencies: torch.Tensor,
+        align: bool = False,
 ) -> Qwen2MoeSparseMoeBlock:
     for label in group_labels.unique():
         expert_indices = torch.where(group_labels == label)[0]
 
+        if len(expert_indices) == 1:
+            continue
+
+        if align:
+            experts = align_weights([ffn.experts[expert_idx] for expert_idx in expert_indices])
+            for idx, expert_idx in enumerate(expert_indices):
+                ffn.experts[expert_idx] = experts[idx]
+
+        freq = usage_frequencies[expert_indices]
+        freq_sum = torch.sum(freq, dim=0) + FP32_EPS
+
         gate_proj_weight_list = torch.stack(
-            [ffn.experts[expert_idx].gate_proj.weight * usage_frequencies[expert_idx]
+            [casted_mul(ffn.experts[expert_idx].gate_proj.weight, usage_frequencies[expert_idx])
              for expert_idx in expert_indices], dim=0
         )
         down_proj_weight_list = torch.stack(
-            [ffn.experts[expert_idx].down_proj.weight * usage_frequencies[expert_idx]
+            [casted_mul(ffn.experts[expert_idx].down_proj.weight, usage_frequencies[expert_idx])
              for expert_idx in expert_indices], dim=0
         )
         up_proj_weight_list = torch.stack(
-            [ffn.experts[expert_idx].up_proj.weight * usage_frequencies[expert_idx]
+            [casted_mul(ffn.experts[expert_idx].up_proj.weight, usage_frequencies[expert_idx])
              for expert_idx in expert_indices], dim=0
         )
-        gate_proj_weight = torch.sum(gate_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
-        down_proj_weight = torch.sum(down_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
-        up_proj_weight = torch.sum(up_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
+        gate_proj_weight = (torch.sum(gate_proj_weight_list.to(torch.float32), dim=0) / freq_sum).to(gate_proj_weight_list)
+        down_proj_weight = (torch.sum(down_proj_weight_list.to(torch.float32), dim=0) / freq_sum).to(down_proj_weight_list)
+        up_proj_weight = (torch.sum(up_proj_weight_list.to(torch.float32), dim=0) / freq_sum).to(up_proj_weight_list)
 
         ffn.experts[expert_indices[0]].gate_proj.weight.copy_(gate_proj_weight)
         ffn.experts[expert_indices[0]].down_proj.weight.copy_(down_proj_weight)

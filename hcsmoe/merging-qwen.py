@@ -243,10 +243,10 @@ def run_hcsmoe(
     group_st = time.time()
     if merge == "freq" or dominant == "frequency":
         grouper.compute_all_usages(model, dataloader_for_merging)
-        print_usage_frequency(grouper._usage_frequency_state_dict)
+        # print_usage_frequency(grouper._usage_frequency_state_dict)
     if dynamic_group:
         grouper.compute_all_usages(model, dataloader_for_merging, mode=hierarchical_stopping_metric)
-        print_usage_frequency(grouper._usage_frequency_state_dict)
+        # print_usage_frequency(grouper._usage_frequency_state_dict)
     
 
     ### 2. Get dominant experts
@@ -313,8 +313,8 @@ def run_hcsmoe(
     if not os.path.exists(output_path+"/model"):
         os.makedirs(output_path+"/model")
     model.save_pretrained(output_path+"/model",
-                                      safe_serialization=True,
-                                      max_shard_size='4GB')
+                          safe_serialization=True,
+                          max_shard_size='10GB' if '-FP8' in args.model_name else '4GB')
     tokenizer.save_pretrained(output_path+"/model")
     print('saving done!')
 
