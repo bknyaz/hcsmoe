@@ -36,6 +36,7 @@ class Args:
         similarity_base: Optional[str] = "router-logits",
         merge: Optional[str] = "zipit",
         mode: Optional[str] = "normal",
+        dataset: Optional[str] = "c4",
         n_sentences: Optional[int] = 32,
         train_batch_size: Optional[int] = 4,
         eval_batch_size: Optional[int] = 32,
@@ -63,6 +64,7 @@ class Args:
         self.similarity_base = similarity_base
         self.merge = merge
         self.mode = mode
+        self.dataset = dataset
         self.n_sentences = n_sentences
         self.train_batch_size = train_batch_size
         self.eval_batch_size = eval_batch_size
@@ -85,7 +87,7 @@ class Args:
 
 def get_dataloader(args, tokenizer):
     return get_calib_dataloder(
-        dataset="c4",  # or 'all'
+        dataset=args.dataset,
         tokenizer=tokenizer,
         max_block_size=2048,
         n_blocks_for_stat=args.n_sentences, # 32, 128
@@ -169,6 +171,7 @@ def run_hcsmoe(
         similarity_base: Optional[str] = "router-logits", # router-logits, weight, expert-output
         merge: Optional[str] = "zipit", # no, freq, zipit, update, fix-dom, unmerge,ix-dom-same
         mode: Optional[str] = "normal", # normal, activation-with-router-logits, input-weight, all
+        dataset: Optional[str] = "c4", # c4 or all
         n_sentences: Optional[int] = 32,
         train_batch_size: Optional[int] = 4,
         eval_batch_size: Optional[int] = 32,
@@ -200,6 +203,7 @@ def run_hcsmoe(
         similarity_base=similarity_base,
         merge=merge,
         mode=mode,
+        dataset=dataset,
         n_sentences=n_sentences,
         train_batch_size=train_batch_size,
         eval_batch_size=eval_batch_size,
@@ -241,12 +245,12 @@ def run_hcsmoe(
     print("[HC-SMoE] Number of parameters before merging:", model.num_parameters())
     print(f"[HC-SMoE] Merging into average {num_average_groups} groups...")
     group_st = time.time()
-    if merge == "freq" or dominant == "frequency":
+    if merge in ["freq", "freq-align"] or dominant == "frequency":
         grouper.compute_all_usages(model, dataloader_for_merging)
-        # print_usage_frequency(grouper._usage_frequency_state_dict)
+        print_usage_frequency(grouper._usage_frequency_state_dict)
     if dynamic_group:
         grouper.compute_all_usages(model, dataloader_for_merging, mode=hierarchical_stopping_metric)
-        # print_usage_frequency(grouper._usage_frequency_state_dict)
+        print_usage_frequency(grouper._usage_frequency_state_dict)
     
 
     ### 2. Get dominant experts
@@ -276,9 +280,10 @@ def run_hcsmoe(
         raise ValueError(f"Unknown dominant: {dominant}")   
 
     ### 3. Merging
-    if merge == "freq":
+    if merge in ["freq", "freq-align"]:
         model = merge_by_groups_with_usage_weighted(
-            model, grouper=grouper, merging_layers=list(range(start_layer, model.config.num_hidden_layers))
+            model, grouper=grouper, merging_layers=list(range(start_layer, model.config.num_hidden_layers)),
+            align="align" in merge
         )
     elif merge != 'no':
         model = merge_by_groups_within_and_across_models(

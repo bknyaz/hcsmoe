@@ -1004,6 +1004,10 @@ class ExpertsGrouperForQwen2MoE(object):
                     router_score = F.softmax(all_router_logits[layer_idx], dim=1)
                     scores = router_score.float().sum(0) / router_score.shape[0]
                     self._usage_frequency_state_dict[ffn_name] += scores.cpu()
+        # replace 0 with freq=0.5 to avoid 0 weighting (enable a bit of weight for all experts for task generalization)
+        for k, v in self._usage_frequency_state_dict.items():
+            v[v == 0] = min(0.5, v[v > 0].min().item())
+        # normalize the usage frequency
         self._usage_frequency_state_dict = {
             k: v / torch.sum(v) for k, v in self._usage_frequency_state_dict.items()
         }
@@ -1269,8 +1273,8 @@ def align_weights(experts):
 
     print('running weight alignment...')
     def mlp2mat(mlp):
-        fp = torch.cat([mlp.gate_proj.weight, mlp.up_proj.weight, mlp.down_proj.weight.t()], dim=1)  # (768, 2048+2048+2048=6144)
-        return fp
+        fp = torch.cat([mlp.gate_proj.weight, mlp.up_proj.weight, mlp.down_proj.weight.t()], dim=1)
+        return fp  # (768, 2048+2048+2048=6144)
 
     def apply_perm_to_mlp(mlp, perm):
         # perm maps A_i -> B_perm[i]; to align B to A order:
@@ -1281,13 +1285,13 @@ def align_weights(experts):
         return mlp_aligned
 
     expert_weights = torch.stack([mlp2mat(mlp) for mlp in experts])  # (n, 768, 6144)
+    expert_weights = expert_weights / torch.norm(expert_weights, dim=-1, keepdim=True)  # normalize
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     experts_aligned = [experts[0]]  # first expert is the reference
+    weights_a = expert_weights[0].to(device).float()
     for i in range(1, len(experts)):
-        weights_a = expert_weights[0]
-        weights_b = expert_weights[i]
-        cost = torch.cdist(weights_a.to(device).float(),
-                           weights_b.to(device).float()).cpu().numpy()
+        weights_b = expert_weights[i].to(device).float()
+        cost = torch.cdist(weights_a, weights_b).cpu().numpy()
         _, perm = linear_sum_assignment(cost)  # permutation of B aligned to A
         experts_aligned.append(apply_perm_to_mlp(experts[i], perm))
     return experts_aligned
@@ -2150,6 +2154,7 @@ def merge_by_groups_with_usage_weighted(
         model: Qwen2MoeForCausalLM,
         grouper: ExpertsGrouperForQwen2MoE,
         merging_layers: Optional[List[int]] = None,
+        align: bool = False,
 ) -> Qwen2MoeForCausalLM:
     usage_frequency_dict = grouper.usage_frequency_state_dict()
     group_labels_dict = grouper.group_state_dict()
@@ -2168,6 +2173,7 @@ def merge_by_groups_with_usage_weighted(
             ffn=model.model.layers[layer_idx].mlp,
             group_labels=group_labels,
             usage_frequencies=usage_frequencies,
+            align=align
         )
         print('after merging', layer_idx, ffn_name, sum([p.numel() for p in model.model.layers[layer_idx].mlp.parameters()]))
         #print('gate', model.model.layers[layer_idx].mlp.gate.weight.shape)

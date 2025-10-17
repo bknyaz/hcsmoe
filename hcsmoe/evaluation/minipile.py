@@ -23,8 +23,9 @@ logger = logging.getLogger(__name__)
 
 DATASETS = {
     'c4': lambda: load_dataset('json', data_files='hcsmoe/data/calib_set_c4_hcsmoe.json', trust_remote_code=True),
-    's1': lambda: load_dataset('json', data_files='hcsmoe/data/calib_set_s1k_1.1.json', trust_remote_code=True),
+    's1': lambda: load_dataset('json', data_files='hcsmoe/data/calib_set_s1k_1.1_256.json', trust_remote_code=True),
     'the-stack-smol': lambda: load_dataset('json', data_files='hcsmoe/data/calib_set_the_stack_smol.json', trust_remote_code=True),
+    'kmmlu': lambda: load_dataset('json', data_files='hcsmoe/data/calib_set_kmmlu.json', trust_remote_code=True),
 }
 
 def get_calib_dataloder(
@@ -40,7 +41,7 @@ def get_calib_dataloder(
         all_set = []
         for dname in DATASETS:
             dset = DATASETS[dname]()
-            if dname == 's1':
+            if dname in ['s1', 'kmmlu']:
                 dset = dset['train'].rename_column('question', 'text').select_columns(['text'])
             elif dname == 'the-stack-smol':
                 dset = dset['train'].rename_column('content', 'text').select_columns(['text'])
