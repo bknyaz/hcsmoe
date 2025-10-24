@@ -979,7 +979,22 @@ class ExpertsGrouperForQwen2MoE(object):
     ):
         model.eval()
         config = model.config
-        for batch_ind, batch in enumerate(tqdm(dataloader, desc=f"[HC-SMoE] Evaluating routing distribution")):
+
+        if mode == "reap":
+            forwarded_hidden_states = {}
+            handles = []
+            def _get_activation_hook(name):
+                def hook(module, input, output):
+                    forwarded_hidden_states[name] = input[0].detach().cpu().reshape(-1, input[0].shape[-1])  # .cpu()
+                return hook
+
+            for layer_idx in tqdm(self.sparse_layer_indices, desc=f"[REAP]Registering forward hook..."):
+                ffn_name = f"model.layers.{layer_idx}.mlp"
+                # forwarded_hidden_states[ffn_name] = []
+                moe = model.model.layers[layer_idx].mlp
+                handles.append(moe.register_forward_hook(_get_activation_hook(ffn_name)))
+
+        for batch_ind, batch in enumerate(tqdm(dataloader, desc=f"[HC-SMoE] Evaluating routing distribution with mode={mode}...")):
             batch = {k: v.cuda() for k, v in batch.items()}
             if "labels" in batch:
                 # We don't need to compute loss here, so remove the labels
@@ -991,19 +1006,61 @@ class ExpertsGrouperForQwen2MoE(object):
             all_router_logits = outputs.router_logits
             if mode == "frequency":
                 all_router_logits = torch.stack(all_router_logits)  # of shape (num_hidden_layers, num_tokens, num_experts)
-                selected_experts = torch.topk(all_router_logits, model.config.num_experts_per_tok, dim=-1)[1].reshape(
+                selected_experts = torch.topk(all_router_logits, self.top_k, dim=-1)[1].reshape(
                     config.num_hidden_layers, -1
                 )  # of shape (num_hidden_layers, num_tokens * 2)
                 for layer_idx in self.sparse_layer_indices:
                     ffn_name = f"model.layers.{layer_idx}.mlp"
                     unique, counts = torch.unique(selected_experts[layer_idx], return_counts=True)
                     self._usage_frequency_state_dict[ffn_name][unique.cpu()] += counts.cpu()
+            elif mode == 'reap':
+                for layer_idx in self.sparse_layer_indices:
+                    ffn_name = f"model.layers.{layer_idx}.mlp"
+                    _device = model.model.layers[layer_idx].mlp.experts[0].gate_proj.weight.device
+                    layer_input = forwarded_hidden_states[ffn_name].to(_device)  # .cuda()
+                    expert_outputs = []  # (E, #T, D) -> average -> (E, D)
+                    # print(layer_idx, layer_input.shape)
+                    # 1 torch.Size([4096, 2048])
+                    with torch.no_grad():
+                        for i in range(self.num_experts):
+                            expert_outputs.append(model.model.layers[layer_idx].mlp.experts[i](layer_input))
+                        expert_outputs = torch.stack(expert_outputs)
+                        # print('expert_outputs', expert_outputs.shape, flush=True)
+                        # expert_outputs torch.Size([128, 4096, 2048])
+
+                    gate = F.softmax(all_router_logits[layer_idx], dim=-1, dtype=torch.float)
+                    gate, selected_experts = torch.topk(gate, k=self.top_k, dim=-1)
+                    expert_mask = F.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
+
+                    # Loop over all available experts in the model and perform the computation on each expert
+                    expert_hitted = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+                    avg_norm = torch.zeros(self.num_experts)
+                    for exp_idx in expert_hitted:
+                        exp_idx = exp_idx.item()
+                        current_state = expert_outputs[exp_idx]  # (B*S, H)
+                        idx, top_x = torch.where(expert_mask[exp_idx])
+                        # Index the correct hidden states and compute the expert hidden state for
+                        # the current expert. We need to make sure to multiply the output hidden
+                        # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
+                        current_state = current_state[None, top_x].reshape(-1, current_state.shape[-1])
+                        # print(exp_idx, current_state.shape, gate.shape, gate[top_x, idx, None].shape)
+                        # 0 torch.Size([174, 2048]) torch.Size([2048, 8]) torch.Size([174, 1])
+                        avg_norm[exp_idx] += (current_state.norm(dim=-1) * gate[top_x, idx]).mean().item()
+
+                    self._usage_frequency_state_dict[ffn_name] += avg_norm.data.cpu()  # (E,)
+
             else: # routing-score
                 for layer_idx in self.sparse_layer_indices:
                     ffn_name = f"model.layers.{layer_idx}.mlp"
                     router_score = F.softmax(all_router_logits[layer_idx], dim=1)
                     scores = router_score.float().sum(0) / router_score.shape[0]
                     self._usage_frequency_state_dict[ffn_name] += scores.cpu()
+
+        if mode == "reap":
+            for handle in handles:
+                handle.remove()
+            torch.cuda.empty_cache()
+
         # replace 0 with freq=0.5 to avoid 0 weighting (enable a bit of weight for all experts for task generalization)
         for k, v in self._usage_frequency_state_dict.items():
             v[v == 0] = min(0.5, v[v > 0].min().item())
@@ -1011,6 +1068,14 @@ class ExpertsGrouperForQwen2MoE(object):
         self._usage_frequency_state_dict = {
             k: v / torch.sum(v) for k, v in self._usage_frequency_state_dict.items()
         }
+        # dump usage frequency to json
+        # import json
+        # with open(f"usage_frequency_{mode}_seq128.json", "w") as f:
+        #     json.dump(
+        #         {k: v.tolist() for k, v in self._usage_frequency_state_dict.items()},
+        #         f,
+        #         indent=4
+        #     )
 
     def compute_all_similarities(
             self,

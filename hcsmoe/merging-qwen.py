@@ -245,8 +245,8 @@ def run_hcsmoe(
     print("[HC-SMoE] Number of parameters before merging:", model.num_parameters())
     print(f"[HC-SMoE] Merging into average {num_average_groups} groups...")
     group_st = time.time()
-    if merge in ["freq", "freq-align"] or dominant == "frequency":
-        grouper.compute_all_usages(model, dataloader_for_merging)
+    if merge in ["freq", "freq-align", "reap", "reap-align"] or dominant == "frequency":
+        grouper.compute_all_usages(model, dataloader_for_merging, mode="reap" if "reap" in merge else "frequency")
         print_usage_frequency(grouper._usage_frequency_state_dict)
     if dynamic_group:
         grouper.compute_all_usages(model, dataloader_for_merging, mode=hierarchical_stopping_metric)
@@ -280,7 +280,7 @@ def run_hcsmoe(
         raise ValueError(f"Unknown dominant: {dominant}")   
 
     ### 3. Merging
-    if merge in ["freq", "freq-align"]:
+    if merge in ["freq", "freq-align", "reap", "reap-align"]:
         model = merge_by_groups_with_usage_weighted(
             model, grouper=grouper, merging_layers=list(range(start_layer, model.config.num_hidden_layers)),
             align="align" in merge
